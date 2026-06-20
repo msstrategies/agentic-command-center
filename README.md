@@ -1,172 +1,103 @@
+<div align="center">
+
 # Agentic Command Center
 
-A reference architecture for building reliable autonomous AI agents. Skills as the unit of capability, role-based subagents, guardrail hooks on every tool call, a self-healing error-recovery loop, and eval-driven development.
+**A reference architecture for reliable autonomous AI agents.**
 
-Built to answer one question: how far can a single engineer scale by orchestrating agents instead of doing every step by hand?
+[![License][license-badge]][license]
+[![Sanitized extract][extract-badge]](.)
+[![Eval-driven][eval-badge]](./evals)
 
-> This is a curated, secret-free extract of a larger personal system. It ships the architecture and the genuinely reusable patterns, not private memory, client work, or credentials. Everything here is generic and educational. Drop it into any agent harness (Claude Code, Cursor, Codex, Windsurf) and adapt.
+[Source](.) · [Author portfolio][portfolio]
 
-Sibling project: [github.com/msstrategies/sarah-ai](https://github.com/msstrategies/sarah-ai), an AI operations agent that the eval in this repo is modeled on.
+</div>
 
----
+## The idea
 
-## Why this exists
+A reference architecture for building autonomous agents that stay reliable as tasks get longer. It is a sanitized, secret-free extract of a larger private workspace, shipping the architecture and the genuinely reusable patterns, not private memory, client work, or credentials.
 
-Working with an LLM one prompt at a time does not compound. Errors stack, context is lost between sessions, and the same problem gets re-solved every week. The math is unforgiving: at 90 percent accuracy per step, a five-step task succeeds only 59 percent of the time (0.9^5). The fix is not a better prompt. It is an architecture where capability accumulates and reliability rises with every run.
+## What's inside
 
-The core moves:
+- **Skills as the unit of capability** (`.claude/skills/`) - six self-contained `SKILL.md` capabilities the harness loads by matching the request, so the model only pays the token cost of what it needs.
+- **Role-based subagents** (`.claude/agents/`) - a `conductor` orchestrator that routes work to bounded specialists (`researcher`, `code-reviewer`, `debugger`), keeping raw tool output out of the main thread.
+- **Guardrail hooks on every tool call** (`hooks/`) - a `PreToolUse` secret scan that blocks any write containing secret-shaped tokens, plus a `PostToolUse` redacted audit log. They run at the harness level, so the model cannot skip them.
+- **Self-healing error recovery** (`.claude/rules/`) - a fixed classify, route, fix, retry loop that recovers from solvable failures before escalating.
+- **Eval-driven development** (`evals/`) - every skill or tool gets a binary pass/fail eval, discovered and run by one script.
 
-- Treat **skills as the unit of capability** so each new task starts from accumulated capability, not from zero.
-- **Push the mechanical work into deterministic scripts** so the model only makes decisions, not brittle string manipulation.
-- **Recover from failures automatically** with a classify-route-fix-retry loop.
-- **Enforce the non-negotiables in hooks** that run at the harness level, where the model cannot skip them.
-- **Prove correctness with binary evals** instead of vibes.
+## How it works
 
----
-
-## Architecture
-
-```text
-                         ┌──────────────────────────────────────┐
-                         │                Task                   │
-                         └───────────────────┬──────────────────┘
-                                             │
-                                 ┌───────────▼───────────┐
-                                 │  Conductor (router)    │   orchestrator pattern:
-                                 │  classify, delegate,   │   a thin routing layer
-                                 │  synthesize            │   keeps the main thread lean
-                                 └───────────┬───────────┘
-                  ┌──────────────────────────┼──────────────────────────┐
-                  │                           │                          │
-        ┌─────────▼─────────┐      ┌──────────▼─────────┐     ┌──────────▼─────────┐
-        │     Skills        │      │     Subagents      │     │   Deterministic    │
-        │ one job each,     │      │ researcher,        │     │   scripts          │
-        │ binary-testable   │      │ code-reviewer,     │     │ the mechanical 90% │
-        │ capability units  │      │ debugger, Explore  │     │ (idempotent)       │
-        └─────────┬─────────┘      └──────────┬─────────┘     └──────────┬─────────┘
-                  └──────────────────────────┼──────────────────────────┘
-                                             │ every tool call
-                                 ┌───────────▼───────────┐
-                                 │   Hooks (guardrails)   │  secret scan (blocks),
-                                 │   run at harness level │  audit log (records),
-                                 │   model cannot skip    │  command guards
-                                 └───────────┬───────────┘
-                                             │ on any failure
-                                 ┌───────────▼───────────┐
-                                 │  Self-healing loop     │  classify, route to fix,
-                                 │  3 attempts, then      │  retry, escalate
-                                 │  escalate              │
-                                 └───────────┬───────────┘
-                                             │ proven by
-                                 ┌───────────▼───────────┐
-                                 │   Eval harness         │  binary pass/fail per
-                                 │   evals/run_evals.sh   │  skill or tool
-                                 └────────────────────────┘
-```
+When any tool call, command, or script fails, the agent runs a deterministic recovery loop before reporting back. It tries up to three times, then escalates.
 
 ```mermaid
-graph TD
-  U[Task] --> R[Conductor / orchestrator]
-  R --> S[Skills: one capability each, binary-testable]
-  R --> A[Subagents: researcher, code-reviewer, debugger]
-  S --> SC[Deterministic scripts: the mechanical 90%]
-  A --> SC
-  SC --> H[Hooks: secret scan, audit log, command guards]
-  H --> SH[Self-healing loop: classify, fix, retry, escalate]
-  SH --> E[Eval harness: binary pass/fail]
-  E -. feeds back .-> R
+flowchart TD
+  F[Tool call or script fails] --> C[Classify the error]
+  C --> K{Which class?}
+  K -->|missing tool / dependency| R1[Install]
+  K -->|missing permission| R2[Add permission]
+  K -->|missing credential| R3[Resolve from .env]
+  K -->|rate limit / api error| R4[Backoff or cheaper tier]
+  K -->|logic error| R5[Re-read docs, fix]
+  R1 --> T[Retry original task]
+  R2 --> T
+  R3 --> T
+  R4 --> T
+  R5 --> T
+  T --> S{Resolved?}
+  S -->|yes| D[Done. Patch the skill so this failure cannot recur]
+  S -->|no, under 3 attempts| C
+  S -->|no, 3 attempts| E[Escalate with error, attempts, and what is needed]
 ```
 
----
+The rule that binds this lives in `.claude/rules/autonomous-self-healing.md`. The patch-on-failure step is `.claude/rules/self-annealing.md`.
 
-## The five ideas
+## Run the evals
 
-### 1. Skills as the unit of capability
-
-A skill is a self-contained capability: a `SKILL.md` with frontmatter (name, description, trigger conditions), the instructions, and optionally supporting files and a binary eval. The harness loads a skill by matching the request against its description, so the model only pays the token cost of capabilities it actually needs.
-
-Skills beat prompts because they accumulate. Solve a problem once, capture it as a skill, and every future session starts from that capability instead of re-deriving it. See `.claude/skills/` for six examples, including `systematic-debugging` (root-cause before fixes), `verification-before-completion` (evidence before claims), and `subagent-driven-development` (fresh subagent per task with two-stage review).
-
-### 2. Role-based subagents
-
-Specialized agents handle isolated roles: `researcher` (read plus web, returns a cited brief), `code-reviewer` (bounded, read-only review), `debugger` (systematic isolation). The `conductor` agent is the orchestrator. It classifies the incoming task, dispatches to the right specialist with a self-contained brief, parallelizes independent subtasks, and synthesizes the results.
-
-The point is context hygiene. Raw tool output (file dumps, web crawls, multi-route checks) stays inside the subagent. Only the summary returns to the parent. This is what lets a long task stay coherent. See `.claude/agents/` and `.claude/rules/subagents.md`.
-
-### 3. Hooks as guardrails
-
-Some rules cannot be left to the model's judgment. Hooks run at the harness level on every tool call, so they are not skippable:
-
-- `hooks/pre_edit_secret_scan.py` is a `PreToolUse` hook that scans proposed file writes for secret-shaped tokens (API keys, private key blocks, JWTs) and blocks the write (exit code 2) before any secret can be committed. A path allowlist permits example files.
-- `hooks/audit_log.py` is a `PostToolUse` hook that appends a redacted JSONL record of every tool call for observability. It never blocks.
-
-This is the difference between hoping the model behaves and guaranteeing it cannot leak a credential.
-
-### 4. The self-healing loop
-
-When any tool call, command, or script fails, the agent runs a fixed loop before reporting back: classify the error (missing tool, missing dependency, missing credential, logic error, rate limit, and so on), route to the matching fix (install, add a permission, retry with backoff, fall back to a cheaper model tier), retry the original task, and escalate only after three attempts.
-
-Combined with self-annealing (after a failure, patch the skill so the same failure is impossible next time), the system converges toward zero-failure execution. See `.claude/rules/autonomous-self-healing.md` and `.claude/rules/self-annealing.md`.
-
-### 5. Eval-driven loops
-
-Every skill or tool gets a binary eval: a script that exits 0 (pass) or non-zero (fail). `evals/run_evals.sh` discovers and runs them all. The included `evals/sarah-ai/` eval checks that a tool's demo mode runs fully offline (zero API keys), exits cleanly, and emits deterministic output. That is the smallest useful unit of reliability: a check you can run on every change.
-
-```text
-$ evals/run_evals.sh
-PASS  sarah-ai
-----------------------------------------
-pass=1 fail=0
-```
-
----
-
-## Repository layout
-
-```text
-.
-├── AGENTS.md                 portable, tool-agnostic agent instructions
-├── .claude/
-│   ├── skills/               6 curated, generic skills (capability units)
-│   ├── agents/               conductor (orchestrator) + researcher, code-reviewer, debugger
-│   └── rules/                self-healing, self-annealing, package-age-guard, subagent SOP
-├── evals/
-│   ├── run_evals.sh          binary eval runner (discovers evals/*/eval.sh)
-│   └── sarah-ai/             example eval + self-contained demo target
-├── hooks/
-│   ├── pre_edit_secret_scan.py   blocks writes containing secret-shaped tokens
-│   └── audit_log.py              append-only redacted audit log of tool calls
-├── .env.example
-├── .gitignore
-└── LICENSE
-```
-
----
-
-## Quick start
+The runner discovers every `evals/*/eval.sh`, runs each one, and reports a binary tally. No credentials needed.
 
 ```bash
-# 1. Run the eval harness (no credentials needed)
-evals/run_evals.sh
-
-# 2. Try the secret-scan hook. It blocks a write containing a fake AWS access key
-#    (a token shaped like AKIA followed by 16 uppercase or digit characters).
-printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"src/app.py","content":"k = FAKE_AWS_KEY"}}' \
-  | python3 hooks/pre_edit_secret_scan.py; echo "exit=$?"
-
-# 3. Wire the hooks and rules into your own agent harness, then add skills.
+evals/run_evals.sh            # run all evals
+evals/run_evals.sh sarah-ai   # run one
 ```
 
-Read `AGENTS.md` first. It is the short, tool-agnostic summary. The detailed binding rules live in `.claude/rules/`.
+```text
+PASS  no-em-dashes
+PASS  sarah-ai
+----------------------------------------
+pass=2 fail=0
+```
 
----
+The `sarah-ai` eval checks that a tool's demo mode runs fully offline (zero API keys), exits cleanly, and emits deterministic output. The `no-em-dashes` eval enforces a writing convention across the repo.
 
-## What is deliberately not here
+## Repo layout
 
-Private memory, client work, real credentials, and personal data. This repo is the architecture and the reusable patterns, sanitized for public reference. Never commit `.env` (see `.gitignore`).
+| Path | Role |
+| --- | --- |
+| `AGENTS.md` | Portable, tool-agnostic agent instructions (read first) |
+| `.claude/skills/` | Six curated, generic skills: the capability units |
+| `.claude/agents/` | `conductor` orchestrator plus `researcher`, `code-reviewer`, `debugger` |
+| `.claude/rules/` | Binding rules: self-healing, self-annealing, package-age guard, subagent SOP |
+| `hooks/` | `pre_edit_secret_scan.py` (blocks secrets), `audit_log.py` (records calls) |
+| `evals/` | `run_evals.sh` runner plus example evals and a self-contained demo target |
+| `.env.example` | Variable names only, no values |
+| `LICENSE` | MIT |
 
----
+## Design notes
 
-## License
+**Skills over MCP for recurring tasks.** A skill costs roughly sixty tokens to keep available and loads only when its description matches the request. A standing MCP server can cost ten thousand tokens or more in tool definitions every turn. For a capability used repeatedly, the skill wins on cost and stays version-controlled alongside the code.
 
-MIT. See [LICENSE](LICENSE). Some skills retain their upstream license noted in their frontmatter.
+**Hooks for guardrails, not prompts.** Some rules cannot be left to the model's judgment. A secret scan written as a prompt instruction can be reasoned around or forgotten under load. The same scan as a `PreToolUse` hook runs at the harness level on every write and blocks with a non-zero exit before any secret reaches disk. That is the difference between hoping the model behaves and guaranteeing it cannot leak a credential.
+
+**Deterministic self-heal over ad-hoc retries.** At ninety percent accuracy per step, a five-step task succeeds only fifty-nine percent of the time. A fixed classify, route, fix, retry loop converts most failures into recoveries with bounded, predictable behavior, and the self-annealing step means each failure is patched so it cannot recur. Reliability rises with every run instead of resetting each session.
+
+## License & author
+
+MIT. See [LICENSE][license]. Some skills retain the upstream license noted in their frontmatter.
+
+Built by Michael Sezer. [Portfolio][portfolio] · [Sibling project: sarah-ai][sarah-ai]
+
+[license]: ./LICENSE
+[license-badge]: https://img.shields.io/badge/License-MIT-5fc2b8?style=flat-square
+[extract-badge]: https://img.shields.io/badge/sanitized-extract-3fb98f?style=flat-square
+[eval-badge]: https://img.shields.io/badge/eval--driven-3fb98f?style=flat-square
+[portfolio]: https://msstrategies.github.io
+[sarah-ai]: https://github.com/msstrategies/sarah-ai
